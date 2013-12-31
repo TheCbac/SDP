@@ -51,6 +51,8 @@
 ## device.read(
 
 
+
+
 STATUS_MASTER = 0x01 # Status for master devices
 STATUS_SLAVE = 0X02  # Status for slave devices
 
@@ -68,12 +70,13 @@ BYTE_RANGE = 2**SIZE_BYTE # number of options for a byte (256 is standard)
 
 
 
-POS_REPLY_ID        =0
-POS_REPLY_STATUS    =1
-POS_REPLY_FUNCTION  =2
-POS_REPLY_ADDR      =3
-POS_REPLY_DATA      =4
-POS_REPLY_CRC       =5
+POS_SENDER    =0
+POS_RECIPIENT =1
+POS_STATUS    =2
+POS_FUNCTION  =3
+POS_ADDR      =4
+POS_DATA      =5
+POS_CRC       =6
 
 
 class sdpDevice:    
@@ -85,21 +88,29 @@ class sdpDevice:
         self.name = name        # name just used for verbose
         self.deviceID = deviceID    #Unique Identification code
         self.deviceStatus = status        # Status code (Slave,Master)
+        self.registers={}
 
 
-        
+        self.querySender= 0
+        self.queryRecipient=0
+        self.queryStatus=0
         self.queryFunction = 0
         self.queryAddr=[]
         self.queryData= []
         self.queryCrc = 0
 
+        self.replySender= 0
+        self.replyRecipient=0
+        self.replyStatus=0
+        self.replyFunction = 0
+        self.replyAddr=[]
+        self.replyData= []
+        self.replyCrc = 0
 
-        self.replyAddr =[]
-        self.replyData =[]
-        self.replyCRC= 0
+        self.queryBuffer = [[],[],[],[],[],[],[]]      # buffer for storing incoming packet
+        self.replyBuffer = [[],[],[],[],[],[],[]]      # Buffer for outgoing data
 
-        self.receiveBuffer = []  # buffer for storing incoming packet
-        self.sendBuffer = [[],[],[],[],[],[]]     # Buffer for outgoing data
+
 
 
     ###################################################### 
@@ -118,37 +129,117 @@ class sdpDevice:
 
     ######################################################  
     ## Calculates and returns the CRC from a recieved packet
-    def getCRC(self):
+    def validateQueryCRC(self):
 
-        crcBuff = CRC(self.receiveBuffer[:-1])
+        #calculate CRC
+        crcBuff = CRC(self.queryBuffer[:-1])
         
         if self.ultraVerbose:
-            print "Calculated CRC:", crcBuff
+            print "Calculated query CRC:", crcBuff, "Received query CRC:", self.queryCrc
             
-        return  crcBuff
-    
-    #######################################################
-    ## Compares the calculated CRC with the received CRC
-    def checkCRC(self):
+        return  self.queryCrc == crcBuff
 
-        check = self.receiveBuffer[-1] == self.getCRC()
+    ######################################################  
+    ## Calculates and returns the CRC from a recieved packet
+    def validateReplyCRC(self):
+
+        #calculate CRC
+        crcBuff = CRC(self.replyBuffer[:-1])
         
         if self.ultraVerbose:
-            print "Received CRC:",self.receiveBuffer[-1]
-            print "CRC check:", check
+            print "Calculated reply CRC:", crcBuff, "Received reply CRC:", self.replyCrc
+            
+        return  self.replyCrc == crcBuff
 
-        return check
+    ## Creates the reply CRC
+    def setReplyCRC(self):
+        replyCRC = CRC(self.replyBuffer[:-1])
+        self.replyCRC = replyCRC
+        
+        if self.ultraVerbose:
+            print "replyCRC:", replyCRC
 
 
-    def setReplyAddr(self):
-        buildAddr=[]
+    ## the Writing function
+    def processWrite(self, address, data):
+
+        if address.pop(0) == DELIMIT_ADDR and address.pop() == DELIMIT_ADDR_END and\
+            data.pop(0) == DELIMIT_DATA and data.pop() == DELIMIT_DATA_END:
 
 
-        if self.queryFunction == FN_WRITE:
-            # if writing, return the address written to
-            buildAddr.append(self.queryAddr)
+            
+            address1 = address.pop() # get rid of nested list
+            data1 = data.pop()
+
+            if len(data1) == len(address1):
+                for element in xrange(len(address1)):
+                    
+                    if self.ultraVerbose:
+                        print "Writing" , data1[element], "to" ,address1[element]
+                
+                    self.registers[address1[element]] = data1[element]
+            else:
+                raise sdpError("Address and Data arrays of different lengths")
+
+            return [address1], [data1]
+
+                
+
+        else:
+            if self.ultraVerbose:
+                print "Delimiter mismatch"
+            
+
+            
+
+ ## the reading function
+    def processRead(self, address):
+        dataRead=[]
+        if self.ultraVerbose:
+            print "reading" ,address
+
+
+        if address.pop(0) == DELIMIT_ADDR and address.pop() == DELIMIT_ADDR_END:
+            addressRead = address.pop() # get rid of nested list
+
+            for elements in xrange(len(addressRead)):
+
+                if self.ultraVerbose:
+                    print "reading from Address:", addressRead[elements] 
+
+                dataRead.append(self.registers[addressRead[elements]])
+
+            
+            
+        return [addressRead] , [dataRead] 
+         
 
     
+##############################
+
+    def buildReplyInfo(self):
+        buildAddr=[]
+        buildData=[]
+
+        #################
+        if self.queryFunction == FN_WRITE:
+            try:
+                (buildAddr, buildData) = self.processWrite(self.queryAddr, self.queryData)
+            except KeyError:
+                print "No such register"
+                
+
+            
+        ##################
+        if self.queryFunction == FN_READ:
+            try:
+                (buildAddr, buildData) = self.processRead(self.queryAddr) 
+            except KeyError:
+                print "No such register" 
+            
+
+            
+        
         
         # include the delimiters
         buildAddr.append(DELIMIT_ADDR_END)
@@ -156,83 +247,212 @@ class sdpDevice:
 
         if self.ultraVerbose:
             print "replyAddr:", buildAddr
-        
-        self.replyAddr =buildAddr
-
-
-
-    def setReplyData(self):
-        buildData=[]
-
 
         
-        if self.queryFunction == FN_WRITE:
-            # if writing, return the address written to
-            buildAddr.append(self.queryAddr)
-
-            
-
         # include the delimiters
         buildData.append(DELIMIT_DATA_END)
         buildData.insert(0,DELIMIT_DATA)
 
         if self.ultraVerbose:
             print "replyData:", buildData
-        
-        self.replyData = buildData
-
-    def setReplyCRC(self):
-        replyCRC = CRC(self.sendBuffer[:-1])
-        self.replyCRC = replyCRC
-        
-        if self.ultraVerbose:
-            print "replyCRC:", replyCRC
             
         
-
-    #######################################################
-    ## builds the reply packet to be sent
-    def buildReply(self):
-        self.setReplyAddr()
-        self.setReplyData()
-        
+        self.replyAddr =buildAddr
+        self.replyData = buildData
 
         
-        
+
+            
+                
     #######################################################
     ## builds the packet to be sent
     def buildReplyPacket(self):
 
-        if self.ultraVerbose:
-            print   "queryFunction:",self.queryFunction 
-            print   "queryAddr:",   self.queryAddr
-            print   "queryData:",   self.queryData
-            print   "queryCRC:",    self.queryCrc
-            print ""
+        if self.validateQueryCRC():
+
+
+            self.replyBuffer[POS_SENDER ] = self.deviceID
+            self.replyBuffer[POS_RECIPIENT] = self.querySender
+            self.replyBuffer[POS_STATUS ] = self.deviceStatus
+            self.replyBuffer[POS_FUNCTION ] = self.queryFunction
+
+            if self.ultraVerbose:
+                    print "replyID:", self.deviceID
+                    print "replyStatus:", self.deviceStatus
+                    print "replyFunction:", self.queryFunction
+
+            self.buildReplyInfo()    
+            self.replyBuffer[POS_ADDR] = self.replyAddr
+            self.replyBuffer[POS_DATA] = self.replyData
+
+            self.setReplyCRC()
+            self.replyBuffer[POS_CRC] =  self.replyCRC
+
+            
+            if self.verbose:
+                print self.name, "Produced Reply Packet:", self.replyBuffer
+
+        else:
+            print "Query CRC Validation Failed"
+
+
+    #add address delimiters
+    def delimitAddr(self, addr):
+        dAddr=[addr]
+        dAddr.append(DELIMIT_ADDR_END)
+        dAddr.insert(0,DELIMIT_ADDR)
+
+        return dAddr
+
+    # add the data delimiters
+    def delimitData(self, data):
+        dData=[data]
+        dData.append(DELIMIT_DATA_END)
+        dData.insert(0,DELIMIT_DATA)
+
+        return dData
+
+    def readQuery(self):
+        self.querySender = self.queryBuffer[POS_SENDER ]
+        self.queryRecipient = self.queryBuffer[POS_RECIPIENT ] 
+        self.queryStatus = self.queryBuffer[POS_STATUS ] 
+        self.queryFunction  = self.queryBuffer[POS_FUNCTION ] 
+        self.queryAddr = self.queryBuffer[POS_ADDR] 
+        self.queryData =  self.queryBuffer[POS_DATA]  
+        self.queryCrc  = self.queryBuffer[POS_CRC]
+
+    def readReply(self):
+        self.replySender =      self.replyBuffer[POS_SENDER ]
+        self.replyRecipient =   self.replyBuffer[POS_RECIPIENT ] 
+        self.replyStatus =      self.replyBuffer[POS_STATUS ] 
+        self.replyFunction  =   self.replyBuffer[POS_FUNCTION ] 
+        self.replyAddr =        self.replyBuffer[POS_ADDR] 
+        self.replyData =        self.replyBuffer[POS_DATA]  
+        self.replyCrc  =        self.replyBuffer[POS_CRC]
+
+        if self.validateReplyCRC():
+            if self.ultraVerbose:
+                print "validatedreplyCRC"
+            
+        else:
+            raise sdpError("Reply CRC failed")
+            
+
+    def replyMatchQuery(self):
+
+        if self.replySender == self.queryRecipient and \
+           self.replyFunction == self.queryFunction: 
+           
+           return True
+
+        print self.name, self.replySender , self.queryRecipient
+
+        return False
         
 
-        self.sendBuffer[POS_REPLY_ID ] = self.deviceID
-        self.sendBuffer[POS_REPLY_STATUS ] = self.deviceStatus
-        self.sendBuffer[POS_REPLY_FUNCTION ] = self.queryFunction
+###################################
+            
+    def buildQueryPacket(self):
 
+        self.querySender = self.deviceID
         if self.ultraVerbose:
-                print "replyID:", self.deviceID
-                print "replyStatus:", self.deviceStatus
-                print "replyFunction:", self.queryFunction
+                print   "querySender", self.querySender
+                print   "queryRecipient", self.queryRecipient
+                print   "queryFunction:",self.queryFunction 
+                print   "queryAddr:",   self.queryAddr
+                print   "queryData:",   self.queryData
+                print   "queryCRC:",    self.queryCrc
+                print ""
+            
 
-        self.buildReply()    
-        self.sendBuffer[POS_REPLY_ADDR] = self.replyAddr
-        self.sendBuffer[POS_REPLY_DATA] = self.replyData
+            
+        self.queryBuffer[POS_SENDER ] = self.querySender
+        self.queryBuffer[POS_RECIPIENT ] = self.queryRecipient
+        self.queryBuffer[POS_STATUS ] = self.deviceStatus
+        self.queryBuffer[POS_FUNCTION ] = self.queryFunction   
 
-        self.setReplyCRC()
-        self.sendBuffer[POS_REPLY_CRC] =  self.replyCRC
 
-        
+        #Add on the delimiter
+        self.queryBuffer[POS_ADDR] = self.delimitAddr(self.queryAddr)
+        self.queryBuffer[POS_DATA] = self.delimitData(self.queryData)
+
+        #Build the CRC 
+        self.queryBuffer[POS_CRC] =  CRC(self.queryBuffer[:-1])
+
         if self.verbose:
-            print "Reply Packet:", self.sendBuffer
+            print self.name , "produced Query Packet:", self.queryBuffer
+
+        return self.queryBuffer
+        
+
+    def receiveQueryPacket(self, packet):
+
+        #if directed at me 
+        if packet[POS_RECIPIENT] == self.deviceID:
+            
+            self.queryBuffer = packet
+            if self.ultraVerbose:
+                print self.name,  "received Query packet:", packet
+
+            self.readQuery()
+            self.buildReplyPacket()
+
+            return self.replyBuffer
+            
+        else:
+            if self.ultraVerbose:
+                print self.name ,"Packet passed. Expected ID:", self.deviceID, "received  ID:", packet[POS_RECIPIENT]
+
+
+
+
+    def receiveReplyPacket(self, packet):
+
+        #if directed at me 
+        if packet[POS_RECIPIENT] == self.deviceID:
+            self.replyBuffer= packet
+
+            if self.ultraVerbose:
+                print self.name,  "received Reply packet:", packet
+
+            self.readReply()
+
+            if self.replyMatchQuery():
+
+                if self.queryFunction == FN_WRITE:
+                    return len(self.replyAddr[1])
+
+                elif self.queryFunction == FN_READ:
+                    return (self.replyAddr[1], self.replyData[1])
+            
+
+            
+
+    def writeReg(self, device, addr, data):
+        self.queryRecipient = device
+        self.queryFunction = FN_WRITE
+        self.queryAddr = addr
+        self.queryData = data
+
+        self.buildQueryPacket()
+
+        return self.queryBuffer
+
+    def readReg(self, device, addr):
+        self.queryRecipient = device
+        self.queryFunction = FN_READ
+        self.queryAddr = addr
+        self.queryData = []
+
+        self.buildQueryPacket()
+
+        return self.queryBuffer
 
     
-    #######################################################
+        
+
+
+#######################################################
     ## Debugging functions
     def setVerbose(self):
         self.verbose = True
@@ -247,7 +467,16 @@ class sdpDevice:
     def clearVerbose(self):
         self.verbose = False
         self.ultraVerbose = False
-        print self.name, "Non-Verbose"        
+        print self.name, "Non-Verbose"
+
+    def setQuery(self):
+        self.queryBuffer[POS_SENDER ] = self.deviceID
+        self.queryBuffer[POS_RECIPIENT ] = self.queryRecipient
+        self.queryBuffer[POS_STATUS ] = self.deviceStatus
+        self.queryBuffer[POS_FUNCTION ] = self.queryFunction   
+        self.queryBuffer[POS_ADDR] = self.queryAddr
+        self.queryBuffer[POS_DATA] = self.queryData
+        self.queryBuffer[POS_CRC] =  self.queryCrc
 
 
 
@@ -304,12 +533,15 @@ def CRC(array):
 test = [1,12,4,5]
 test1 = [1,[12,4],4]
 RPi = sdpDevice('RPi',0x01, STATUS_MASTER)
-RPi.setUltraVerbose()
-RPi.receiveBuffer=test1
-RPi.queryAddr =10
-RPi.queryFunction = FN_WRITE
+#RPi.setVerbose()
 
 
+Ard = sdpDevice('Ard',0x02, STATUS_SLAVE)
+#Ard.setVerbose()
+
+
+RPi.receiveReplyPacket(Ard.receiveQueryPacket(RPi.writeReg(2, [50,40],[21,20])))
+RPi.receiveReplyPacket(Ard.receiveQueryPacket(RPi.readReg(2, [50,40])))
 
 
 ##########################################
